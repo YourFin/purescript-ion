@@ -5,6 +5,7 @@ import Prelude
 
 import Control.Alt ((<|>))
 import Control.Alternative (empty)
+import Data.Array (fold)
 import Data.Array as Array
 import Data.ArrayBuffer.Builder as BinBuilder
 import Data.ArrayBuffer.Types (ArrayBuffer)
@@ -15,7 +16,7 @@ import Data.Int.Bits as IntBits
 import Data.List (List(..), (:))
 import Data.List as List
 import Data.String.CodeUnits as StringCU
-import Data.Traversable (sequence_)
+import Data.Traversable (sequence_, traverse, traverse_)
 import Data.UInt (UInt)
 import Data.UInt as UInt
 import Effect.Unsafe (unsafePerformEffect)
@@ -38,9 +39,49 @@ foreign import buf2hex :: ArrayBuffer -> String
 --  # map buf2hex
 --  # runParser str
 
+--- Binary: Blobs & Clobs
+
+clob :: forall m. IonTextParser m ArrayBuffer
+clob = lobStart *> (shortQuoted <|> longQuoted) <* skipMany ws <* lobEnd
+  where
+    shortQuoted :: forall m'. IonTextParser m' ArrayBuffer
+    shortQuoted = skipMany ws *> shortQuote *> shortText <* shortQuote
+
+    shortText :: forall m'. IonTextParser m' ArrayBuffer
+    shortText =
+      PA.many (map (map $ uint <<< toCharCode)
+                       (map Array.singleton shortChar <|> (try commonEscape))
+                       <|> map Array.singleton hexEscape)
+        # map Array.fold
+        # map (traverse_ BinBuilder.putUint8)
+        # map BinBuilder.execPut
+        # map unsafePerformEffect
+
+    shortChar :: forall m'. IonTextParser m' Char
+    shortChar =
+      chars $ "\x0020-\x0021" -- no double quote
+        <> "\x0023-\x005B" -- no backslash
+        <> "\x005D-\x007F"
+
+
+    longQuoted :: forall m'. IonTextParser m' ArrayBuffer
+    longQuoted = ?_
+
+    uint :: Int -> UInt
+    uint = unsafeCoerce
+
+lobStart :: forall m. IonTextParser m String
+lobStart = PT.string "{{"
+
+lobEnd :: forall m. IonTextParser m String
+lobEnd = PT.string "}}"
+
+blob :: forall m. IonTextParser m ArrayBuffer
+blob = lobStart *> skipMany ws *> base64 <* skipMany ws <* lobEnd
+
 -- TODO: Streaming
 base64 :: forall m. IonTextParser m ArrayBuffer
-base64 =  (unsafePerformEffect <<< BinBuilder.execPutM <<< sequence_) <$>
+base64 = (unsafePerformEffect <<< BinBuilder.execPutM <<< sequence_) <$>
           ((PA.many $ base64Quartet <* skipMany ws) <>
            (Array.singleton <$> (option mempty ((try base64Pad2) <|> base64Pad1))))
   where
@@ -88,8 +129,8 @@ base64 =  (unsafePerformEffect <<< BinBuilder.execPutM <<< sequence_) <$>
     base64Char = parseDigit 'A' 'Z' 0
                  <|> parseDigit 'a' 'z' 26
                  <|> parseDigit '0' '9' 52
-                 <|> (PT.char '+' $> (unsafeCoerce 62))
-                 <|> (PT.char '/' $> (unsafeCoerce 63))
+                 <|> (PT.char '+' $> (uint 62))
+                 <|> (PT.char '/' $> (uint 63))
                  # expected "Base 64 character (A-Za-z0-9+/)"
 
     first2Bits :: UInt -> UInt
@@ -108,8 +149,30 @@ base64 =  (unsafePerformEffect <<< BinBuilder.execPutM <<< sequence_) <$>
     uint = unsafeCoerce
 
 
+--- Common ion bits
+
+commonEscape :: forall m. IonTextParser m (Array Char)
+commonEscape =
+  PT.char '\\' *>
+    (map Array.singleton
+      (chars "\"'/?\\"
+       <|> (PT.char '0' $> '\x0000')
+       <|> (PT.char 'a' $> '\x0007')
+       <|> (PT.char 'b' $> '\x0008')
+       <|> (PT.char 't' $> '\x0009')
+       <|> (PT.char 'n' $> '\x000A')
+       <|> (PT.char 'v' $> '\x000B')
+       <|> (PT.char 'f' $> '\x000C')
+       <|> (PT.char 'r' $> '\x000D')
+       )
+      <|> (newline $> mempty))
+
+-- | Returned UInt guaranteed to be byte-sized
 hexEscape :: forall m. IonTextParser m UInt
-hexEscape = PT.char '\\' *> (PT.char 'u' *> ((\a b -> (UInt.shl (unsafeCoerce 4) a) `UInt.and` b) <$> hexDigit <*> hexDigit))
+hexEscape = PT.char '\\' *> (PT.char 'u' *> ((\a b -> (UInt.shl (uint 4) a) `UInt.and` b) <$> hexDigit <*> hexDigit))
+  where
+    uint :: Int -> UInt
+    uint = unsafeCoerce
 
 decDigit :: forall m. IonTextParser m UInt
 decDigit = parseDigit '0' '9' 0
@@ -125,6 +188,12 @@ digit :: forall m. IonTextParser m UInt
 digit = parseDigit '0' '9' 0
         # expected "digit"
 
+shortQuote :: forall m. IonTextParser m Char
+shortQuote = PT.char '"'
+
+longQuote :: forall m. IonTextParser m String
+longQuote = PT.string "'''"
+
 newline :: forall m. IonTextParser m String
 newline = strs
           [ "\x000D\x000A" -- carriage return + line feed
@@ -135,8 +204,8 @@ newline = strs
 
 ws :: forall m. IonTextParser m Char
 ws = wsNotNL <|> chars ("\x000A" -- line feed
-                          <> "\x000D" -- carriage return
-                         )
+                        <> "\x000D" -- carriage return
+                       )
 
 wsNotNL :: forall m. IonTextParser m Char
 wsNotNL = chars ("\x0009" -- tab
@@ -170,7 +239,7 @@ between a b c = ((toCharCode a) <= (toCharCode b)) && ((toCharCode b) <= (toChar
 expected :: forall m a. String -> IonTextParser m a -> IonTextParser m a
 expected tipe = asErrorMessage ("Expected " <> tipe)
 
-parseDigit :: forall m a. Char -> Char -> Int -> IonTextParser m UInt
+parseDigit :: forall m. Char -> Char -> Int -> IonTextParser m UInt
 parseDigit start end val = map (unsafeCoerce <<< convert) $ chars (StringCU.singleton start <> "-" <> StringCU.singleton end)
   where
     convert :: Char -> Int
