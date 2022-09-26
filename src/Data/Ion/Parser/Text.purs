@@ -5,8 +5,8 @@ import Prelude
 
 import Control.Alt ((<|>))
 import Control.Alternative (empty)
-import Data.Array (fold)
 import Data.Array as Array
+import Data.Array.NonEmpty as ArrayNE
 import Data.ArrayBuffer.Builder as BinBuilder
 import Data.ArrayBuffer.Types (ArrayBuffer)
 import Data.Char (toCharCode)
@@ -16,9 +16,11 @@ import Data.Int.Bits as IntBits
 import Data.List (List(..), (:))
 import Data.List as List
 import Data.String.CodeUnits as StringCU
-import Data.Traversable (sequence_, traverse, traverse_)
+import Data.Traversable (fold, sequence_, traverse, traverse_)
 import Data.UInt (UInt)
 import Data.UInt as UInt
+import Debug (spy, traceM)
+import Effect.Class (class MonadEffect)
 import Effect.Unsafe (unsafePerformEffect)
 import Parsing.Combinators (asErrorMessage, many, option, optional, skipMany, try, withErrorMessage)
 import Parsing.Combinators.Array as PA
@@ -41,11 +43,13 @@ foreign import buf2hex :: ArrayBuffer -> String
 
 --- Binary: Blobs & Clobs
 
+type BufPart = forall mb. MonadEffect mb => BinBuilder.PutM mb Unit
+
 clob :: forall m. IonTextParser m ArrayBuffer
-clob = lobStart *> (shortQuoted <|> longQuoted) <* skipMany ws <* lobEnd
+clob = (traceM "start") *> lobStart *> skipMany ws *> (shortQuoted <|> longQuoted) <* skipMany ws <* lobEnd
   where
     shortQuoted :: forall m'. IonTextParser m' ArrayBuffer
-    shortQuoted = skipMany ws *> shortQuote *> shortText <* shortQuote
+    shortQuoted = shortQuote *> shortText <* shortQuote
 
     shortText :: forall m'. IonTextParser m' ArrayBuffer
     shortText =
@@ -53,6 +57,7 @@ clob = lobStart *> (shortQuoted <|> longQuoted) <* skipMany ws <* lobEnd
                        (map Array.singleton shortChar <|> (try commonEscape))
                        <|> map Array.singleton hexEscape)
         # map Array.fold
+        # map (spy "first fold")
         # map (traverse_ BinBuilder.putUint8)
         # map BinBuilder.execPut
         # map unsafePerformEffect
@@ -63,21 +68,45 @@ clob = lobStart *> (shortQuoted <|> longQuoted) <* skipMany ws <* lobEnd
         <> "\x0023-\x005B" -- no backslash
         <> "\x005D-\x007F"
 
+    longQuoted :: forall m' mb. IonTextParser m' ArrayBuffer
+    longQuoted =
+      PA.many1 (traceM "many1" *> skipMany ws *> longQuote *> (PA.many longText) <* longQuote)
+        # map fold
+        # map BinBuilder.execPut
+        # map unsafePerformEffect
 
-    longQuoted :: forall m'. IonTextParser m' ArrayBuffer
-    longQuoted = ?_
+    longText :: forall m'. IonTextParser m' BufPart
+    longText = impl <|> (sq <> (impl <|> (sq <> impl)))
+      where
+        sq :: forall m''. IonTextParser m'' BufPart
+        sq = (PT.string "\\'") $> BinBuilder.putUint8 (uint $ toCharCode '\'')
+        impl :: forall m''. IonTextParser m'' (Array UInt)
+        impl =
+          (map (map $ uint <<< toCharCode)
+                            (map Array.singleton longChar <|> (try commonEscape))
+                            <|> map Array.singleton hexEscape)
+
+    longChar :: forall m' mb. IonTextParser m' Char
+    longChar =
+      chars $ "\x0020-\x0026" -- no single quote
+        <> "\x0028-\x005B" -- no backslash
+        <> "\x005D-\x007F"
+
+    longQuote :: forall m'. IonTextParser m' String
+    longQuote = PT.string "'''"
 
     uint :: Int -> UInt
     uint = unsafeCoerce
+
+
+blob :: forall m. IonTextParser m ArrayBuffer
+blob = lobStart *> skipMany ws *> base64 <* skipMany ws <* lobEnd
 
 lobStart :: forall m. IonTextParser m String
 lobStart = PT.string "{{"
 
 lobEnd :: forall m. IonTextParser m String
 lobEnd = PT.string "}}"
-
-blob :: forall m. IonTextParser m ArrayBuffer
-blob = lobStart *> skipMany ws *> base64 <* skipMany ws <* lobEnd
 
 -- TODO: Streaming
 base64 :: forall m. IonTextParser m ArrayBuffer
@@ -191,8 +220,6 @@ digit = parseDigit '0' '9' 0
 shortQuote :: forall m. IonTextParser m Char
 shortQuote = PT.char '"'
 
-longQuote :: forall m. IonTextParser m String
-longQuote = PT.string "'''"
 
 newline :: forall m. IonTextParser m String
 newline = strs
