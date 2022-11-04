@@ -5,6 +5,7 @@ import Prelude
 
 import Control.Alt ((<|>))
 import Control.Alternative (empty)
+import Control.Monad.Rec.Class (class MonadRec, whileJust)
 import Data.Array as Array
 import Data.Array.NonEmpty as ArrayNE
 import Data.ArrayBuffer.Builder as BinBuilder
@@ -20,9 +21,10 @@ import Data.Traversable (fold, sequence_, traverse, traverse_)
 import Data.UInt (UInt)
 import Data.UInt as UInt
 import Debug (spy, traceM)
-import Effect.Class (class MonadEffect)
+import Effect (Effect)
 import Effect.Unsafe (unsafePerformEffect)
-import Parsing.Combinators (asErrorMessage, many, option, optional, skipMany, try, withErrorMessage)
+import Parsing.Combinators (asErrorMessage, many, option, optionMaybe, optional, skipMany, try, withErrorMessage)
+import Parsing.Combinators as PComb
 import Parsing.Combinators.Array as PA
 import Parsing.String as PT
 import Type.Proxy (Proxy(..))
@@ -43,22 +45,18 @@ foreign import buf2hex :: ArrayBuffer -> String
 
 --- Binary: Blobs & Clobs
 
-type BufPart = forall mb. MonadEffect mb => BinBuilder.PutM mb Unit
+type BufPart = BinBuilder.PutM Effect Unit
 
 clob :: forall m. IonTextParser m ArrayBuffer
-clob = (traceM "start") *> lobStart *> skipMany ws *> (shortQuoted <|> longQuoted) <* skipMany ws <* lobEnd
+clob = lobStart *> skipMany ws *> (shortQuoted <|> longQuoted) <* skipMany ws <* lobEnd
   where
     shortQuoted :: forall m'. IonTextParser m' ArrayBuffer
     shortQuoted = shortQuote *> shortText <* shortQuote
 
     shortText :: forall m'. IonTextParser m' ArrayBuffer
     shortText =
-      PA.many (map (map $ uint <<< toCharCode)
-                       (map Array.singleton shortChar <|> (try commonEscape))
-                       <|> map Array.singleton hexEscape)
-        # map Array.fold
-        # map (spy "first fold")
-        # map (traverse_ BinBuilder.putUint8)
+      whileJust (optionMaybe ((map charToBufPart shortChar <|> (try $ commonEscape charToBufPart))
+                       <|> map BinBuilder.putUint8 hexEscape))
         # map BinBuilder.execPut
         # map unsafePerformEffect
 
@@ -68,10 +66,9 @@ clob = (traceM "start") *> lobStart *> skipMany ws *> (shortQuoted <|> longQuote
         <> "\x0023-\x005B" -- no backslash
         <> "\x005D-\x007F"
 
-    longQuoted :: forall m' mb. IonTextParser m' ArrayBuffer
+    longQuoted :: forall m'. IonTextParser m' ArrayBuffer
     longQuoted =
-      PA.many1 (traceM "many1" *> skipMany ws *> longQuote *> (PA.many longText) <* longQuote)
-        # map fold
+      whileJust1 (skipMany ws *> longQuote *> (whileJust (optionMaybe longText)) <* longQuote)
         # map BinBuilder.execPut
         # map unsafePerformEffect
 
@@ -80,14 +77,11 @@ clob = (traceM "start") *> lobStart *> skipMany ws *> (shortQuoted <|> longQuote
       where
         sq :: forall m''. IonTextParser m'' BufPart
         sq = (PT.string "\\'") $> BinBuilder.putUint8 (uint $ toCharCode '\'')
-        impl :: forall m''. IonTextParser m'' (Array UInt)
-        impl =
-          (map (map $ uint <<< toCharCode)
-                            (map Array.singleton longChar <|> (try commonEscape))
-                            <|> map Array.singleton hexEscape)
+        impl :: forall m''. IonTextParser m'' BufPart
+        impl = longChar <|> (try $ commonEscape charToBufPart) <|> map BinBuilder.putUint8 hexEscape
 
-    longChar :: forall m' mb. IonTextParser m' Char
-    longChar =
+    longChar :: forall m'. IonTextParser m' BufPart
+    longChar = map (BinBuilder.putUint8 <<< uint <<< toCharCode) $
       chars $ "\x0020-\x0026" -- no single quote
         <> "\x0028-\x005B" -- no backslash
         <> "\x005D-\x007F"
@@ -98,6 +92,11 @@ clob = (traceM "start") *> lobStart *> skipMany ws *> (shortQuoted <|> longQuote
     uint :: Int -> UInt
     uint = unsafeCoerce
 
+    charToBufPart :: Char -> BufPart
+    charToBufPart = BinBuilder.putUint8 <<< uint <<< toCharCode
+
+    whileJust1 :: forall m' a. Monoid a => IonTextParser m' a -> IonTextParser m' a
+    whileJust1 p = p <> whileJust (optionMaybe p)
 
 blob :: forall m. IonTextParser m ArrayBuffer
 blob = lobStart *> skipMany ws *> base64 <* skipMany ws <* lobEnd
@@ -180,10 +179,10 @@ base64 = (unsafePerformEffect <<< BinBuilder.execPutM <<< sequence_) <$>
 
 --- Common ion bits
 
-commonEscape :: forall m. IonTextParser m (Array Char)
-commonEscape =
+commonEscape :: forall m a. Monoid a => (Char -> a) -> IonTextParser m a
+commonEscape conv =
   PT.char '\\' *>
-    (map Array.singleton
+    (map conv
       (chars "\"'/?\\"
        <|> (PT.char '0' $> '\x0000')
        <|> (PT.char 'a' $> '\x0007')

@@ -13,18 +13,25 @@ to generate this file without the comments in this block.
 { name = "my-project"
 , dependencies =
   [ "arraybuffer-builder"
+  , "arraybuffer-types"
   , "arrays"
   , "console"
   , "control"
   , "debug"
   , "effect"
+  , "either"
+  , "enums"
+  , "foldable-traversable"
+  , "integers"
   , "lists"
   , "parsing"
   , "parsing-dataview"
   , "pipes"
   , "prelude"
   , "strings"
+  , "tailrec"
   , "uint"
+  , "unsafe-coerce"
   ]
 , packages = ./packages.dhall
 , sources = [ "src/**/*.purs", "test/**/*.purs" ]
