@@ -109,9 +109,9 @@ lobEnd = PT.string "}}"
 
 -- TODO: Streaming
 base64 :: forall m. IonTextParser m ArrayBuffer
-base64 = (unsafePerformEffect <<< BinBuilder.execPutM <<< sequence_) <$>
-          ((PA.many $ base64Quartet <* skipMany ws) <>
-           (Array.singleton <$> (option mempty ((try base64Pad2) <|> base64Pad1))))
+base64 = (unsafePerformEffect <<< BinBuilder.execPutM) <$>
+          ((whileJust $ optionMaybe (try base64Quartet <* skipMany ws)) <>
+           (option mempty ((try base64Pad2) <|> base64Pad1)))
   where
     base64Quartet :: forall m'. IonTextParser m' (BinBuilder.Put Unit)
     base64Quartet = do
