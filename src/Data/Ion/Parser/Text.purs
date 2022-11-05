@@ -5,14 +5,16 @@ import Prelude
 
 import Control.Alt ((<|>))
 import Control.Alternative (empty)
+import Control.Monad.Error.Class (liftMaybe)
 import Control.Monad.Rec.Class (class MonadRec, whileJust)
 import Data.Array as Array
 import Data.Array.NonEmpty as ArrayNE
 import Data.ArrayBuffer.Builder as BinBuilder
 import Data.ArrayBuffer.Types (ArrayBuffer)
-import Data.Char (toCharCode)
+import Data.Char (fromCharCode, toCharCode)
 import Data.Either (Either)
 import Data.Enum as Enum
+import Data.Int as Int
 import Data.Int.Bits as IntBits
 import Data.List (List(..), (:))
 import Data.List as List
@@ -37,11 +39,20 @@ type IonTextParser m a = ParserT String m a
 
 foreign import buf2hex :: ArrayBuffer -> String
 
---execQuartet :: forall m. String -> Either ParseError String
---execQuartet str = base64Quartet
---  # map (unsafePerformEffect <<< BinBuilder.execPut)
---  # map buf2hex
---  # runParser str
+--- String
+
+textEscape :: forall m. IonTextParser m String
+textEscape = commonEscape StringCU.singleton <|> toCharEscape hexEscape <|> toCharEscape unicodeEscape
+  where
+    toCharEscape :: forall m'. IonTextParser m' UInt -> IonTextParser m' String
+    toCharEscape parseEscapeCode = do
+      charCode <- parseEscapeCode
+      pos <- position
+      char <- liftMaybe (ParseError "Invalid character code" pos) (fromCharCode $ int charCode)
+      pure $ StringCU.singleton char
+
+    int :: UInt -> Int
+    int = unsafeCoerce
 
 --- Binary: Blobs & Clobs
 
@@ -197,8 +208,36 @@ commonEscape conv =
 
 -- | Returned UInt guaranteed to be byte-sized
 hexEscape :: forall m. IonTextParser m UInt
-hexEscape = PT.char '\\' *> (PT.char 'u' *> ((\a b -> (UInt.shl (uint 4) a) `UInt.and` b) <$> hexDigit <*> hexDigit))
+hexEscape = PT.char '\\' *> (PT.char 'x' *> ((\a b -> (UInt.shl (uint 4) a) + b) <$> hexDigit <*> hexDigit))
   where
+    uint :: Int -> UInt
+    uint = unsafeCoerce
+
+unicodeEscape :: forall m. IonTextParser m UInt
+unicodeEscape = PT.char '\\' *>
+                (((try $ PT.char 'u') *> hexDigitQuartet)
+                 <|> PT.char 'U' *> hexDigitOctet)
+  where
+
+    hexDigitOctet :: forall m'. IonTextParser m' UInt
+    hexDigitOctet = do
+      a <- hexDigitQuartet
+      b <- hexDigitQuartet
+      pure $ (UInt.shl (uint $ 4*4) a) + b
+
+    hexDigitQuartet :: forall m'. IonTextParser m' UInt
+    hexDigitQuartet = do
+      a <- hexDigit
+      b <- hexDigit
+      c <- hexDigit
+      d <- hexDigit
+      pure $
+        (a
+        -- Each digit is 4 bits
+        # (UInt.shl (uint 4)) >>> ((+) b)
+        # (UInt.shl (uint 4)) >>> ((+) c)
+        # (UInt.shl (uint 4)) >>> ((+) d)
+      )
     uint :: Int -> UInt
     uint = unsafeCoerce
 
