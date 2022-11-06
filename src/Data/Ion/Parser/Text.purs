@@ -14,12 +14,14 @@ import Data.ArrayBuffer.Types (ArrayBuffer)
 import Data.Char (fromCharCode, toCharCode)
 import Data.Either (Either)
 import Data.Enum as Enum
+import Data.Foldable (fold)
 import Data.Int as Int
 import Data.Int.Bits as IntBits
 import Data.List (List(..), (:))
 import Data.List as List
 import Data.String.CodeUnits as StringCU
-import Data.Traversable (fold, sequence_, traverse, traverse_)
+import Data.Traversable (sequence_, traverse, traverse_)
+import Data.Tuple (fst)
 import Data.UInt (UInt)
 import Data.UInt as UInt
 import Debug (spy, trace, traceM)
@@ -38,6 +40,17 @@ type Byte = UInt
 type IonTextParser m a = ParserT String m a
 
 --- String
+string :: forall m. Monad m => IonTextParser m String
+string = shortQuotedString <|> longQuotedString
+  where
+    longQuotedString = appendMany1 $ try (skipMany ws *> PT.string "'''") *> consume *>
+                       ((PComb.manyTill longChr (PT.string "'''")) <#> fold)
+    longChr = (StringCU.singleton <$> chars "\x0020-\x005B\x005D-\x10FFFF" <|> textEscape)
+    shortQuotedString = PT.char '"' *> consume *>
+                        appendMany shortChr
+                        <* PT.char '"'
+    shortChr = StringCU.singleton <$> chars "\x0020-\x0021\x0023-\x005B\x005D-\x10FFFF"
+               <|> textEscape
 
 textEscape :: forall m. IonTextParser m String
 textEscape = (try $ commonEscape StringCU.singleton) <|> (try $ toCharEscape hexEscape) <|> toCharEscape unicodeEscape
@@ -56,7 +69,7 @@ textEscape = (try $ commonEscape StringCU.singleton) <|> (try $ toCharEscape hex
 
 type BufPart = BinBuilder.PutM Effect Unit
 
-clob :: forall m. IonTextParser m ArrayBuffer
+clob :: forall m. Monad m => IonTextParser m ArrayBuffer
 clob = lobStart *> skipMany ws *> (shortQuoted <|> longQuoted) <* skipMany ws <* lobEnd
   where
     shortQuoted :: forall m'. IonTextParser m' ArrayBuffer
@@ -64,8 +77,8 @@ clob = lobStart *> skipMany ws *> (shortQuoted <|> longQuoted) <* skipMany ws <*
 
     shortText :: forall m'. IonTextParser m' ArrayBuffer
     shortText =
-      whileJust (optionMaybe ((map charToBufPart shortChar <|> (try $ commonEscape charToBufPart))
-                       <|> map BinBuilder.putUint8 hexEscape))
+      appendMany ((map charToBufPart shortChar <|> (try $ commonEscape charToBufPart))
+                       <|> map BinBuilder.putUint8 hexEscape)
         # map BinBuilder.execPut
         # map unsafePerformEffect
 
@@ -75,9 +88,9 @@ clob = lobStart *> skipMany ws *> (shortQuoted <|> longQuoted) <* skipMany ws <*
         <> "\x0023-\x005B" -- no backslash
         <> "\x005D-\x007F"
 
-    longQuoted :: forall m'. IonTextParser m' ArrayBuffer
+    longQuoted :: forall m'. Monad m' =>  IonTextParser m' ArrayBuffer
     longQuoted =
-      whileJust1 (skipMany ws *> longQuote *> (whileJust (optionMaybe longText)) <* longQuote)
+      appendMany1 (skipMany ws *> longQuote *> appendMany longText <* longQuote)
         # map BinBuilder.execPut
         # map unsafePerformEffect
 
@@ -104,10 +117,7 @@ clob = lobStart *> skipMany ws *> (shortQuoted <|> longQuoted) <* skipMany ws <*
     charToBufPart :: Char -> BufPart
     charToBufPart = BinBuilder.putUint8 <<< uint <<< toCharCode
 
-    whileJust1 :: forall m' a. Monoid a => IonTextParser m' a -> IonTextParser m' a
-    whileJust1 p = p <> whileJust (optionMaybe p)
-
-blob :: forall m. IonTextParser m ArrayBuffer
+blob :: forall m. Monad m => IonTextParser m ArrayBuffer
 blob = lobStart *> skipMany ws *> base64 <* skipMany ws <* lobEnd
 
 lobStart :: forall m. IonTextParser m String
@@ -117,12 +127,12 @@ lobEnd :: forall m. IonTextParser m String
 lobEnd = PT.string "}}"
 
 -- TODO: Streaming
-base64 :: forall m. IonTextParser m ArrayBuffer
+base64 :: forall m. Monad m => IonTextParser m ArrayBuffer
 base64 = (unsafePerformEffect <<< BinBuilder.execPutM) <$>
-          ((whileJust $ optionMaybe (try base64Quartet <* skipMany ws)) <>
+          ((appendMany $ try base64Quartet <* skipMany ws) <>
            (option mempty ((try base64Pad2) <|> base64Pad1)))
   where
-    base64Quartet :: forall m'. IonTextParser m' (BinBuilder.Put Unit)
+    base64Quartet :: forall m'. Monad m' => IonTextParser m' (BinBuilder.Put Unit)
     base64Quartet = do
       -- 4 6bit (base64) uints -> 3 8bit (byte) uints
       u1 <- base64Char
@@ -137,7 +147,7 @@ base64 = (unsafePerformEffect <<< BinBuilder.execPutM) <$>
         BinBuilder.putUint8 $ ((last4Bits u2) `UInt.shl` (uint 4)) + (first4Bits u3)
         BinBuilder.putUint8 $ ((last2Bits u3) `UInt.shl` (uint 6)) + u4
 
-    base64Pad1 :: forall m'. IonTextParser m' (BinBuilder.Put Unit)
+    base64Pad1 :: forall m'. Monad m' => IonTextParser m' (BinBuilder.Put Unit)
     base64Pad1 = do
       u1 <- base64Char
       skipMany ws
@@ -150,7 +160,7 @@ base64 = (unsafePerformEffect <<< BinBuilder.execPutM) <$>
         BinBuilder.putUint8 $ (u1 `UInt.shl` (uint 2)) + (first2Bits u2)
         BinBuilder.putUint8 $ ((last4Bits u2) `UInt.shl` (uint 4)) + (first4Bits u3)
 
-    base64Pad2 :: forall m'. IonTextParser m' (BinBuilder.Put Unit)
+    base64Pad2 :: forall m'. Monad m' => IonTextParser m' (BinBuilder.Put Unit)
     base64Pad2 = do
       u1 <- base64Char
       skipMany ws
@@ -184,7 +194,6 @@ base64 = (unsafePerformEffect <<< BinBuilder.execPutM) <$>
       (uint 3 {-000011 bit mask-}) `UInt.and` int6bits
     uint :: Int -> UInt
     uint = unsafeCoerce
-
 
 --- Common ion bits
 
@@ -264,21 +273,30 @@ newline = strs
           ]
           # expected "newline"
 
-ws :: forall m. IonTextParser m Char
+ws :: forall m. Monad m => IonTextParser m Unit
 ws = wsNotNL <|> chars ("\x000A" -- line feed
                         <> "\x000D" -- carriage return
-                       )
+                       ) $> unit
+             <|> blockComment
+             <|> lineComment
 
-wsNotNL :: forall m. IonTextParser m Char
+wsNotNL :: forall m. Monad m => IonTextParser m Unit
 wsNotNL = chars ("\x0009" -- tab
           <> "\x000B" -- vertical tab
           <> "\x000C" -- form feed
-          <> "\x0020") -- space
+          <> "\x0020" -- space
+                ) $> unit
           # expected "non-newline whitespace"
 
 underscore :: forall m. IonTextParser m String
 underscore = PT.string "_"
              # expected "_"
+
+blockComment :: forall m. Monad m => IonTextParser m Unit
+blockComment = PT.string "/*" *> PT.anyTill (PT.string "*/") $> unit
+
+lineComment :: forall m. Monad m => IonTextParser m Unit
+lineComment = PT.string "//" *> PT.anyTill (newline $> unit <|> PT.eof) $> unit
 
 --- Helper functions
 
@@ -306,3 +324,9 @@ parseDigit start end val = map (unsafeCoerce <<< convert) $ chars (StringCU.sing
   where
     convert :: Char -> Int
     convert char = (Enum.fromEnum char) - (Enum.fromEnum start) + val
+
+appendMany :: forall m a. Monoid a => IonTextParser m a -> IonTextParser m a
+appendMany = whileJust <<< optionMaybe
+
+appendMany1 :: forall m' a. Monoid a => IonTextParser m' a -> IonTextParser m' a
+appendMany1 p = p <> appendMany p
