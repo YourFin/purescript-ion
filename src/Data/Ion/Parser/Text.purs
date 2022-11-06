@@ -22,7 +22,7 @@ import Data.String.CodeUnits as StringCU
 import Data.Traversable (fold, sequence_, traverse, traverse_)
 import Data.UInt (UInt)
 import Data.UInt as UInt
-import Debug (spy, traceM)
+import Debug (spy, trace, traceM)
 import Effect (Effect)
 import Effect.Unsafe (unsafePerformEffect)
 import Parsing.Combinators (asErrorMessage, many, option, optionMaybe, optional, skipMany, try, withErrorMessage)
@@ -37,12 +37,10 @@ type Byte = UInt
 
 type IonTextParser m a = ParserT String m a
 
-foreign import buf2hex :: ArrayBuffer -> String
-
 --- String
 
 textEscape :: forall m. IonTextParser m String
-textEscape = commonEscape StringCU.singleton <|> toCharEscape hexEscape <|> toCharEscape unicodeEscape
+textEscape = (try $ commonEscape StringCU.singleton) <|> (try $ toCharEscape hexEscape) <|> toCharEscape unicodeEscape
   where
     toCharEscape :: forall m'. IonTextParser m' UInt -> IonTextParser m' String
     toCharEscape parseEscapeCode = do
@@ -208,7 +206,7 @@ commonEscape conv =
 
 -- | Returned UInt guaranteed to be byte-sized
 hexEscape :: forall m. IonTextParser m UInt
-hexEscape = PT.char '\\' *> (PT.char 'x' *> ((\a b -> (UInt.shl (uint 4) a) + b) <$> hexDigit <*> hexDigit))
+hexEscape = PT.char '\\' *> (PT.char 'x' *> ((\a b -> (UInt.shl a (uint 4)) + b) <$> hexDigit <*> hexDigit))
   where
     uint :: Int -> UInt
     uint = unsafeCoerce
@@ -218,12 +216,11 @@ unicodeEscape = PT.char '\\' *>
                 (((try $ PT.char 'u') *> hexDigitQuartet)
                  <|> PT.char 'U' *> hexDigitOctet)
   where
-
     hexDigitOctet :: forall m'. IonTextParser m' UInt
     hexDigitOctet = do
       a <- hexDigitQuartet
       b <- hexDigitQuartet
-      pure $ (UInt.shl (uint $ 4*4) a) + b
+      pure $ (UInt.shl a (uint $ 4*4)) + b
 
     hexDigitQuartet :: forall m'. IonTextParser m' UInt
     hexDigitQuartet = do
@@ -234,9 +231,9 @@ unicodeEscape = PT.char '\\' *>
       pure $
         (a
         -- Each digit is 4 bits
-        # (UInt.shl (uint 4)) >>> ((+) b)
-        # (UInt.shl (uint 4)) >>> ((+) c)
-        # (UInt.shl (uint 4)) >>> ((+) d)
+        # ((flip UInt.shl) (uint 4)) >>> ((+) b)
+        # ((flip UInt.shl) (uint 4)) >>> ((+) c)
+        # ((flip UInt.shl) (uint 4)) >>> ((+) d)
       )
     uint :: Int -> UInt
     uint = unsafeCoerce
