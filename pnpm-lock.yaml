@@ -1,0 +1,14 @@
+lockfileVersion: 5.3
+
+specifiers:
+  big-integer: ^1.6.51
+
+dependencies:
+  big-integer: 1.6.51
+
+packages:
+
+  /big-integer/1.6.51:
+    resolution: {integrity: sha512-GPEid2Y9QU1Exl1rpO9B2IPJGHPSupF5GnVIP0blYvNOMer2bTvSWs1jGOUg04hTmu67nmLsQ9TBo1puaotBHg==}
+    engines: {node: '>=0.6'}
+    dev: false

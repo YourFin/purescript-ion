@@ -15,6 +15,7 @@ to generate this file without the comments in this block.
   [ "arraybuffer-builder"
   , "arraybuffer-types"
   , "arrays"
+  , "bigints"
   , "console"
   , "control"
   , "debug"

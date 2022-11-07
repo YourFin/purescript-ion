@@ -14,5 +14,6 @@ in mkShell {
     easy-ps.purs-0_15_2
     easy-ps.purescript-language-server
     easy-ps.purs-tidy
+    nodePackages.pnpm
   ];
 }

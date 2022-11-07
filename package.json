@@ -1,0 +1,25 @@
+{
+  "name": "purescript-ion",
+  "version": "0.1.0",
+  "description": "Purescript parser for Amazon Ion",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YourFin/purescript-ion.git"
+  },
+  "author": "",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/YourFin/purescript-ion/issues"
+  },
+  "homepage": "https://github.com/YourFin/purescript-ion#readme",
+  "dependencies": {
+    "big-integer": "^1.6.51"
+  }
+}
